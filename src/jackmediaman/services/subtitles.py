@@ -5,6 +5,7 @@ Supports both OpenSubtitles.org (XML-RPC) and OpenSubtitles.com (REST API).
 
 import base64
 import gzip
+import re
 import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
@@ -15,11 +16,144 @@ from xmlrpc.client import ServerProxy
 import httpx
 
 from jackmediaman.core.config import get_settings, save_setting
-from jackmediaman.core.exceptions import OpenSubtitlesError
+from jackmediaman.core.exceptions import OpenSubtitlesError, OpenSubtitlesQuotaError
 
 
 # Video file extensions to process
 VIDEO_EXTENSIONS = {".mkv", ".mp4", ".avi", ".m4v", ".wmv", ".ts", ".mov"}
+
+# Text OpenSubtitles.org serves non-VIP accounts instead of the real subtitle
+PLACEHOLDER_MARKERS = ("osdb.link/vip", "opensubtitles.org vip")
+
+# Only files this small are read when checking for placeholders on disk
+PLACEHOLDER_MAX_BYTES = 64 * 1024
+
+_SRT_TIMING = re.compile(
+    r"(\d+):(\d{2}):(\d{2})[,.](\d{1,3})\s*-->\s*(\d+):(\d{2}):(\d{2})[,.](\d{1,3})"
+)
+
+
+def is_placeholder_subtitle(text: str) -> bool:
+    """Return True if subtitle text is an ad/placeholder rather than a real subtitle.
+
+    Placeholders are: empty text, anything carrying the OpenSubtitles VIP ad,
+    or at most 2 cues spanning an hour or more with under 300 chars of text.
+
+    >>> ad = (
+    ...     "1\\n00:00:00,001 --> 04:00:00,003\\n"
+    ...     "Become OpenSubtitles.org VIP Member\\n"
+    ...     "to get subtitles -> osdb.link/vip\\n"
+    ... )
+    >>> len(ad.encode())
+    102
+    >>> is_placeholder_subtitle(ad)
+    True
+    >>> is_placeholder_subtitle("1\\n00:00:00,001 --> 04:00:00,003\\nSome other ad\\n")
+    True
+    >>> real = (
+    ...     "1\\n00:00:01,000 --> 00:00:03,000\\nHello there.\\n\\n"
+    ...     "2\\n00:00:04,000 --> 00:00:06,000\\nGeneral Kenobi.\\n\\n"
+    ...     "3\\n00:42:10,500 --> 00:42:12,000\\nYou are a bold one.\\n"
+    ... )
+    >>> is_placeholder_subtitle(real)
+    False
+    >>> is_placeholder_subtitle(real + "\\n4\\n00:50:00,000 --> 00:50:03,000\\nSupport us: osdb.link/vip\\n")
+    False
+    >>> is_placeholder_subtitle("1\\n00:00:01,000 --> 00:00:03,000\\nHi\\n")
+    False
+    >>> is_placeholder_subtitle("")
+    True
+    >>> is_placeholder_subtitle("  \\n\\t ")
+    True
+    """
+    if not text or not text.strip():
+        return True
+
+    cues = _SRT_TIMING.findall(text)
+    # Real subtitles sometimes carry the VIP ad as one cue among hundreds; only a
+    # file that is (almost) nothing but the ad counts
+    lower = text.lower()
+    if len(cues) <= 2 and any(marker in lower for marker in PLACEHOLDER_MARKERS):
+        return True
+
+    if not cues or len(cues) > 2 or len(text.strip()) >= 300:
+        return False
+
+    def seconds(h: str, m: str, s: str, ms: str) -> float:
+        return int(h) * 3600 + int(m) * 60 + int(s) + int(ms) / 1000
+
+    start = seconds(*cues[0][:4])
+    end = seconds(*cues[-1][4:])
+    return end - start >= 3600
+
+
+def is_placeholder_subtitle_file(path: Path) -> bool:
+    """Return True if a subtitle file on disk is a placeholder (see is_placeholder_subtitle).
+
+    Files larger than PLACEHOLDER_MAX_BYTES are never read and count as real.
+
+    >>> import tempfile
+    >>> d = Path(tempfile.mkdtemp())
+    >>> ad = d / "a.en.srt"
+    >>> _ = ad.write_text("1\\n00:00:00,001 --> 04:00:00,003\\nosdb.link/vip\\n")
+    >>> is_placeholder_subtitle_file(ad)
+    True
+    >>> real = d / "b.en.srt"
+    >>> _ = real.write_text("1\\n00:00:01,000 --> 00:00:03,000\\nHello\\n")
+    >>> is_placeholder_subtitle_file(real)
+    False
+    >>> is_placeholder_subtitle_file(d / "missing.srt")
+    False
+    >>> import shutil; shutil.rmtree(d)
+    """
+    try:
+        if path.stat().st_size > PLACEHOLDER_MAX_BYTES:
+            return False
+        return is_placeholder_subtitle(path.read_text(encoding="utf-8", errors="replace"))
+    except OSError:
+        return False
+
+
+def subtitle_exists(path: Path) -> bool:
+    """Return True if a real (non-placeholder) subtitle file exists at path.
+
+    >>> import tempfile
+    >>> d = Path(tempfile.mkdtemp())
+    >>> subtitle_exists(d / "v.en.srt")
+    False
+    >>> _ = (d / "v.en.srt").write_text("1\\n00:00:00,001 --> 04:00:00,003\\nosdb.link/vip\\n")
+    >>> subtitle_exists(d / "v.en.srt")
+    False
+    >>> _ = (d / "v.en.srt").write_text("1\\n00:00:01,000 --> 00:00:03,000\\nHello\\n")
+    >>> subtitle_exists(d / "v.en.srt")
+    True
+    >>> import shutil; shutil.rmtree(d)
+    """
+    return path.exists() and not is_placeholder_subtitle_file(path)
+
+
+def find_placeholder_subtitles(directory: Path) -> List[Path]:
+    """Find placeholder .srt files under a directory.
+
+    >>> import tempfile
+    >>> d = Path(tempfile.mkdtemp())
+    >>> (d / "Show").mkdir()
+    >>> _ = (d / "Show" / "ep.en.srt").write_text("osdb.link/vip")
+    >>> _ = (d / "Show" / "ep2.en.srt").write_text("1\\n00:00:01,000 --> 00:00:02,000\\nHi\\n")
+    >>> _ = (d / "Show" / "ep.mkv").write_text("not a subtitle")
+    >>> [p.name for p in find_placeholder_subtitles(d)]
+    ['ep.en.srt']
+    >>> find_placeholder_subtitles(d / "nope")
+    []
+    >>> import shutil; shutil.rmtree(d)
+    """
+    if not directory.exists():
+        return []
+    return sorted(
+        p
+        for p in directory.rglob("*")
+        if p.suffix.lower() == ".srt" and p.is_file() and is_placeholder_subtitle_file(p)
+    )
 
 # Language code mappings (ISO 639-1 <-> ISO 639-2)
 # OpenSubtitles.org uses 3-letter codes, .com uses 2-letter codes
@@ -250,6 +384,22 @@ class OpenSubtitlesOrgClient:
             raise OpenSubtitlesError(f"Download failed: {e}") from e
 
 
+def _quota_message(response: httpx.Response) -> str:
+    """Build a readable quota-exceeded message from a .com /download response."""
+    try:
+        data = response.json()
+    except ValueError:
+        data = {}
+    message = "OpenSubtitles.com download quota used up"
+    if isinstance(data, dict):
+        if data.get("message"):
+            message = f"{message}: {data['message']}"
+        reset = data.get("reset_time_utc") or data.get("reset_time")
+        if reset:
+            message = f"{message} (resets {reset})"
+    return message
+
+
 class OpenSubtitlesComClient:
     """Client for OpenSubtitles.com REST API.
 
@@ -273,6 +423,7 @@ class OpenSubtitlesComClient:
         self.password = password or settings.opensubtitles_com_password or ""
         self.jwt_token = settings.opensubtitles_com_jwt_token or ""
         self.last_request_time = 0.0
+        self.quota_exhausted = False  # Set once the API reports 0 downloads remaining
 
     def _rate_limit(self) -> None:
         """Enforce rate limiting between requests."""
@@ -454,6 +605,11 @@ class OpenSubtitlesComClient:
                     timeout=30.0,
                 )
 
+            # 406 = download quota used up for this period
+            if response.status_code == 406:
+                self.quota_exhausted = True
+                raise OpenSubtitlesQuotaError(_quota_message(response))
+
             if response.status_code != 200:
                 raise OpenSubtitlesError(
                     f"Download request failed: HTTP {response.status_code}"
@@ -461,6 +617,10 @@ class OpenSubtitlesComClient:
 
             # Get the download link from response
             data = response.json()
+            remaining = data.get("remaining")
+            if isinstance(remaining, int) and remaining <= 0:
+                # This download still counts; any further request would be refused
+                self.quota_exhausted = True
             download_link = data.get("link")
             if not download_link:
                 raise OpenSubtitlesError("No download link in response")
@@ -514,7 +674,18 @@ class SubtitleService:
         else:
             self.clients = self._get_clients()
 
+        # Providers dropped for the rest of this run (served an ad placeholder)
+        self.disabled_providers: set[str] = set()
+        # Set when the run should stop (quota used up, or every provider disabled)
+        self.stop_reason: Optional[str] = None
+
         self.logger.debug(f"Initialized with providers: {[name for name, _ in self.clients]}")
+
+    def _disable_provider(self, provider_name: str, reason: str) -> None:
+        """Stop using a provider for the rest of this run."""
+        self.disabled_providers.add(provider_name)
+        if all(name in self.disabled_providers for name, _ in self.clients):
+            self.stop_reason = f"No usable subtitle providers left ({reason})"
 
     def _get_clients(self) -> List[tuple]:
         """Get list of (provider_name, client) for all configured providers.
@@ -626,9 +797,30 @@ class SubtitleService:
                     provider=provider_name,
                 )
 
+            # Never save an ad; this provider can't serve us, so drop it for the run
+            if is_placeholder_subtitle(content):
+                self.logger.warning(
+                    f"OpenSubtitles.{provider_name} returned an ad instead of a subtitle "
+                    f"for {path.name}; not saving it and skipping {provider_name} "
+                    f"for the rest of this run"
+                )
+                self._disable_provider(
+                    provider_name, f"OpenSubtitles.{provider_name} only serves ads"
+                )
+                return SubtitleResult(
+                    video_path=path,
+                    success=False,
+                    error="Provider returned an ad instead of a subtitle",
+                    provider=provider_name,
+                )
+
             # Save subtitle file
             subtitle_path = path.with_suffix(f".{lang}.srt")
             subtitle_path.write_text(content, encoding="utf-8")
+
+            if getattr(client, "quota_exhausted", False):
+                self.stop_reason = "OpenSubtitles.com download quota used up"
+                self.logger.warning(f"{self.stop_reason}; stopping this run")
 
             self.logger.info(f"Downloaded from {provider_name}: {path.name} ({lang})")
             return SubtitleResult(
@@ -636,6 +828,16 @@ class SubtitleService:
                 subtitle_path=subtitle_path,
                 language=lang,
                 success=True,
+                provider=provider_name,
+            )
+
+        except OpenSubtitlesQuotaError as e:
+            self.stop_reason = str(e)
+            self.logger.warning(f"{e}; stopping this run")
+            return SubtitleResult(
+                video_path=path,
+                success=False,
+                error=str(e),
                 provider=provider_name,
             )
 
@@ -671,10 +873,10 @@ class SubtitleService:
                 lang.strip() for lang in self.settings.subtitle_languages.split(",")
             ]
 
-        # Check if subtitle already exists
+        # Check if subtitle already exists (an ad placeholder counts as missing)
         for lang in languages:
             subtitle_path = path.with_suffix(f".{lang}.srt")
-            if subtitle_path.exists() and not overwrite:
+            if subtitle_exists(subtitle_path) and not overwrite:
                 self.logger.debug(f"Skipping (exists): {path.name}")
                 return SubtitleResult(
                     video_path=path,
@@ -693,9 +895,15 @@ class SubtitleService:
                 error="No subtitle providers configured",
             )
 
+        if self.stop_reason:
+            return SubtitleResult(video_path=path, success=False, error=self.stop_reason)
+
         # Try each provider until one succeeds
         errors = []
         for provider_name, client in self.clients:
+            if provider_name in self.disabled_providers:
+                continue
+
             result = self._try_provider(provider_name, client, path, languages)
 
             if result.success:
@@ -703,6 +911,9 @@ class SubtitleService:
 
             # Record failure for this provider
             errors.append(f"{provider_name}: {result.error}")
+
+            if self.stop_reason:
+                break
 
         # All providers failed
         all_errors = "; ".join(errors)
@@ -745,6 +956,10 @@ class SubtitleService:
             result = self.download_for_file(path, languages, overwrite)
             results.append(result)
 
+            if self.stop_reason:
+                self.logger.warning(f"Stopping subtitle run: {self.stop_reason}")
+                break
+
         return results
 
     def download_for_library(
@@ -775,7 +990,7 @@ class SubtitleService:
                     )
                 )
 
-        if media_type in ("movies", "both"):
+        if media_type in ("movies", "both") and not self.stop_reason:
             if self.settings.movies_dir.exists():
                 results.extend(
                     self.download_for_directory(

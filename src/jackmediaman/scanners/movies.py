@@ -64,9 +64,12 @@ class MovieScanner:
         """
         self.quality_parser = quality_parser or QualityParser()
         self._metadata_prober = metadata_prober
+        # Video paths skipped because they are symlinks to files that no longer exist
+        self.broken_links: List[Path] = []
 
     def scan(self, root: Path) -> Iterator[Movie]:
         """Scan movie library: root/MovieName (Year)/movie.file."""
+        self.broken_links = []
         if not root.exists():
             return
 
@@ -78,6 +81,11 @@ class MovieScanner:
 
             for file_path in sorted(movie_dir.iterdir()):
                 if file_path.suffix.lower() not in VIDEO_EXTENSIONS:
+                    continue
+
+                # Dangling symlink (e.g. its torrent was deleted)
+                if not file_path.exists():
+                    self.broken_links.append(file_path)
                     continue
 
                 # Skip sample files
@@ -107,6 +115,7 @@ class MovieScanner:
         Returns:
             List of Movie objects with accurate quality info
         """
+        self.broken_links = []
         if not root.exists():
             return []
 
@@ -121,6 +130,10 @@ class MovieScanner:
 
             for file_path in sorted(movie_dir.iterdir()):
                 if file_path.suffix.lower() not in VIDEO_EXTENSIONS:
+                    continue
+
+                if not file_path.exists():
+                    self.broken_links.append(file_path)
                     continue
 
                 if "sample" in file_path.name.lower():

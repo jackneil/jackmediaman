@@ -229,11 +229,13 @@ def _scan_media(
     movie_matcher: MovieMatcher,
     protector_type: ProtectorType,
     editions_as_dupes: bool,
+    broken_links: Optional[List[Path]] = None,
 ) -> List[DuplicateGroup]:
     """Scan media and return duplicate groups.
 
     Uses ffprobe for accurate quality detection when enabled in settings.
     Results are cached in SQLite for fast subsequent scans.
+    Dangling symlinks skipped by the scanners are appended to broken_links if given.
     """
     settings = get_settings()
     protectors = _build_protectors(protector_type)
@@ -287,6 +289,9 @@ def _scan_media(
                 # Fall back to filename-based scanning
                 items = list(tv_scanner.scan(settings.tv_dir))
 
+            if broken_links is not None:
+                broken_links.extend(tv_scanner.broken_links)
+
             # Apply protectors
             for protector in protectors:
                 protector.protect(items)
@@ -312,6 +317,9 @@ def _scan_media(
             else:
                 # Fall back to filename-based scanning
                 items = list(movie_scanner.scan(settings.movies_dir))
+
+            if broken_links is not None:
+                broken_links.extend(movie_scanner.broken_links)
 
             # Apply protectors
             for protector in protectors:
@@ -356,8 +364,15 @@ def scan(
     ),
 ) -> None:
     """Scan media library and display duplicates found."""
-    groups = _scan_media(media_type, movie_matcher, protector, editions_as_dupes)
+    broken_links: List[Path] = []
+    groups = _scan_media(media_type, movie_matcher, protector, editions_as_dupes, broken_links)
     _display_results(groups)
+
+    if broken_links:
+        console.print(f"[yellow]{len(broken_links)} broken links skipped:[/]")
+        for link in broken_links:
+            console.print(f"  [dim]{link}[/]")
+        console.print()
 
 
 @app.command("clean")

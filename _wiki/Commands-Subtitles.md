@@ -11,6 +11,7 @@ The subtitles command downloads subtitles for your media files using the OpenSub
 | Command | Description |
 |---------|-------------|
 | `jmm subtitles download` | Download subtitles for files |
+| `jmm subtitles purge-ads` | Delete OpenSubtitles ad placeholders saved as subtitles |
 | `jmm subtitles status` | Show OpenSubtitles API status |
 
 ---
@@ -64,6 +65,44 @@ jmm subtitles download --type both --dry-run
 # Force re-download
 jmm subtitles download /path/to/movie.mkv --overwrite
 ```
+
+### Providers, ads and quota
+
+- When both OpenSubtitles.com and OpenSubtitles.org are configured, .com is tried first and .org is the fallback.
+- OpenSubtitles.org hands accounts without VIP a one-cue ad ("Become OpenSubtitles.org VIP Member ... osdb.link/vip") instead of the subtitle. JMM recognises it, never saves it, logs a warning and stops asking that provider for the rest of the run.
+- An existing ad `.srt` counts as missing, so the next run fetches a real subtitle over it.
+- When OpenSubtitles.com reports that the download quota is used up, the run stops with a message instead of continuing to hit the API.
+
+---
+
+## jmm subtitles purge-ads
+
+Delete OpenSubtitles ad placeholders that were saved as `.srt` files. Only `.srt` files of 64 KB or less are read; the ads are about 100 bytes and are deleted outright (not moved to trash).
+
+### Usage
+
+```bash
+jmm subtitles purge-ads [OPTIONS]
+```
+
+### Options
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--type`, `-t` | both | Library to clean: `tv`, `movies`, or `both` |
+| `--dry-run`, `-n` | false | List the ad files and the count without deleting |
+
+### Examples
+
+```bash
+# See what would be removed
+jmm subtitles purge-ads --dry-run
+
+# Remove ads from the TV library only
+jmm subtitles purge-ads --type tv
+```
+
+Also available in the interactive menu under Manage Subtitles > Purge Ad Subtitles.
 
 ---
 

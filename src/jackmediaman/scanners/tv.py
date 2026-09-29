@@ -52,9 +52,12 @@ class TVScanner:
         """
         self.quality_parser = quality_parser or QualityParser()
         self._metadata_prober = metadata_prober
+        # Video paths skipped because they are symlinks to files that no longer exist
+        self.broken_links: List[Path] = []
 
     def scan(self, root: Path) -> Iterator[Episode]:
         """Scan TV library: root/ShowName/Season X/episodes."""
+        self.broken_links = []
         if not root.exists():
             return
 
@@ -74,6 +77,11 @@ class TVScanner:
 
                 for file_path in sorted(season_dir.iterdir()):
                     if file_path.suffix.lower() not in VIDEO_EXTENSIONS:
+                        continue
+
+                    # Dangling symlink (e.g. its torrent was deleted)
+                    if not file_path.exists():
+                        self.broken_links.append(file_path)
                         continue
 
                     episode_nums = self._parse_episode_numbers(file_path.name)
@@ -113,6 +121,7 @@ class TVScanner:
         Returns:
             List of Episode objects with accurate quality info
         """
+        self.broken_links = []
         if not root.exists():
             return []
 
@@ -135,6 +144,11 @@ class TVScanner:
 
                 for file_path in sorted(season_dir.iterdir()):
                     if file_path.suffix.lower() not in VIDEO_EXTENSIONS:
+                        continue
+
+                    # Dangling symlink (e.g. its torrent was deleted)
+                    if not file_path.exists():
+                        self.broken_links.append(file_path)
                         continue
 
                     episode_nums = self._parse_episode_numbers(file_path.name)

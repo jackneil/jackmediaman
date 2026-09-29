@@ -1071,6 +1071,7 @@ def menu_subtitles() -> None:
                 ("Scan Library", "Find and download missing subtitles"),
                 ("Single File", "Download for specific file"),
                 ("Check API Status", "Test OpenSubtitles connection"),
+                ("Purge Ad Subtitles", "Delete OpenSubtitles ad placeholders"),
             ],
             default=1,
             show_back=True,
@@ -1093,6 +1094,10 @@ def menu_subtitles() -> None:
                 subtitles.download(path=path, media_type=None, language=None, overwrite=False, dry_run=False)
         elif choice == 3:
             check_opensubtitles()
+        elif choice == 4:
+            found = subtitles.purge_ads(media_type=SubsMediaType.both, dry_run=True)
+            if found and confirm_action("Delete these ad subtitles?", default=False):
+                subtitles.purge_ads(media_type=SubsMediaType.both, dry_run=False)
 
         _wait_for_enter()
 

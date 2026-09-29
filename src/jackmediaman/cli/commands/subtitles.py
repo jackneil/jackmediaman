@@ -23,6 +23,8 @@ from jackmediaman.services.subtitles import (
     SubtitleService,
     SubtitleResult,
     VIDEO_EXTENSIONS,
+    find_placeholder_subtitles,
+    subtitle_exists,
 )
 
 app = typer.Typer(help="Download subtitles for media files")
@@ -243,7 +245,7 @@ def download(
                     settings.subtitle_languages.split(",")[0].strip()
                 ]:
                     subtitle_path = path.with_suffix(f".{lang}.srt")
-                    if subtitle_path.exists() and not overwrite:
+                    if subtitle_exists(subtitle_path) and not overwrite:
                         results.append(
                             SubtitleResult(
                                 video_path=path,
@@ -299,7 +301,7 @@ def download(
                             settings.subtitle_languages.split(",")[0].strip()
                         ]:
                             subtitle_path = video_path.with_suffix(f".{lang}.srt")
-                            if subtitle_path.exists() and not overwrite:
+                            if subtitle_exists(subtitle_path) and not overwrite:
                                 results.append(
                                     SubtitleResult(
                                         video_path=video_path,
@@ -332,6 +334,9 @@ def download(
                             stats[result.provider or "com"] += 1
                         else:
                             stats["failed"] += 1
+
+                        if service.stop_reason:
+                            break
 
                 # Final update
                 progress.update(task, completed=len(video_files), stats=format_stats())
@@ -382,7 +387,7 @@ def download(
                         settings.subtitle_languages.split(",")[0].strip()
                     ]:
                         subtitle_path = video_path.with_suffix(f".{lang}.srt")
-                        if subtitle_path.exists() and not overwrite:
+                        if subtitle_exists(subtitle_path) and not overwrite:
                             results.append(
                                 SubtitleResult(
                                     video_path=video_path,
@@ -416,6 +421,9 @@ def download(
                     else:
                         stats["failed"] += 1
 
+                    if service.stop_reason:
+                        break
+
             # Final update
             progress.update(task, completed=len(video_files), stats=format_stats())
     else:
@@ -432,7 +440,74 @@ def download(
         raise typer.Exit(1)
 
     _display_results(results, dry_run)
+
+    if service.stop_reason:
+        console.print()
+        console.print(f"[bold yellow]Stopped early:[/] {service.stop_reason}")
     console.print()
+
+
+@app.command("purge-ads")
+def purge_ads(
+    media_type: MediaType = typer.Option(
+        MediaType.both,
+        "--type",
+        "-t",
+        help="Media type to clean (tv, movies, or both)",
+    ),
+    dry_run: bool = typer.Option(
+        False,
+        "--dry-run",
+        "-n",
+        help="List the ad subtitles without deleting them",
+    ),
+) -> int:
+    """Delete OpenSubtitles ad placeholders saved as .srt files.
+
+    Examples:
+
+        jmm subtitles purge-ads --dry-run
+        jmm subtitles purge-ads --type tv
+    """
+    # Returns the number of ad subtitles found (used by the interactive menu)
+    settings = get_settings()
+
+    directories = []
+    if media_type in (MediaType.tv, MediaType.both):
+        directories.append(settings.tv_dir)
+    if media_type in (MediaType.movies, MediaType.both):
+        directories.append(settings.movies_dir)
+
+    ads: List[Path] = []
+    with console.status("Scanning for ad subtitles..."):
+        for directory in directories:
+            ads.extend(find_placeholder_subtitles(directory))
+
+    console.print()
+    if not ads:
+        console.print("[green]No ad subtitles found[/]")
+        console.print()
+        return 0
+
+    if dry_run:
+        for ad in ads:
+            console.print(f"  [dim]{ad}[/]")
+        console.print()
+        console.print(f"[yellow]DRY RUN[/] - would delete {len(ads)} ad subtitles")
+        console.print()
+        return len(ads)
+
+    deleted = 0
+    for ad in ads:
+        try:
+            ad.unlink()
+            deleted += 1
+        except OSError as e:
+            console.print(f"  [red]Could not delete {ad}: {e}[/]")
+
+    console.print(f"[green]Deleted {deleted} ad subtitles[/]")
+    console.print()
+    return len(ads)
 
 
 @app.command("status")
@@ -502,7 +577,7 @@ def status() -> None:
     # Show fallback status
     if has_com and has_org:
         console.print()
-        console.print("[green]✓[/] Both providers configured - will use .com for search, .org for downloads")
+        console.print("[green]✓[/] Both providers configured - .com first, .org as fallback")
 
     console.print()
 
@@ -520,6 +595,7 @@ def main(ctx: typer.Context) -> None:
                 "[dim]Commands:[/]\n"
                 "  jmm subtitles download <path>  Download for file/directory\n"
                 "  jmm subtitles download --type tv  Download for TV library\n"
+                "  jmm subtitles purge-ads        Delete ad placeholder subtitles\n"
                 "  jmm subtitles status           Check API configuration",
                 border_style="cyan",
             )
