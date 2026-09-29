@@ -57,6 +57,8 @@ def is_placeholder_subtitle(text: str) -> bool:
     ... )
     >>> is_placeholder_subtitle(real)
     False
+    >>> is_placeholder_subtitle(real + "\\n4\\n00:50:00,000 --> 00:50:03,000\\nSupport us: osdb.link/vip\\n")
+    False
     >>> is_placeholder_subtitle("1\\n00:00:01,000 --> 00:00:03,000\\nHi\\n")
     False
     >>> is_placeholder_subtitle("")
@@ -67,11 +69,13 @@ def is_placeholder_subtitle(text: str) -> bool:
     if not text or not text.strip():
         return True
 
+    cues = _SRT_TIMING.findall(text)
+    # Real subtitles sometimes carry the VIP ad as one cue among hundreds; only a
+    # file that is (almost) nothing but the ad counts
     lower = text.lower()
-    if any(marker in lower for marker in PLACEHOLDER_MARKERS):
+    if len(cues) <= 2 and any(marker in lower for marker in PLACEHOLDER_MARKERS):
         return True
 
-    cues = _SRT_TIMING.findall(text)
     if not cues or len(cues) > 2 or len(text.strip()) >= 300:
         return False
 
