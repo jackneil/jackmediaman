@@ -1,0 +1,26 @@
+name: Publish Wiki
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - '_wiki/**'
+
+jobs:
+  publish-wiki:
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Publish to Wiki
+        uses: Andrew-Chen-Wang/github-wiki-action@v4
+        with:
+          path: '_wiki/'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

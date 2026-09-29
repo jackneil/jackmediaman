@@ -1,0 +1,94 @@
+# JackMediaMan Configuration
+# Copy to ~/.jackmediaman/config.toml and customize as needed
+#
+# TIP: Run `jmm setup init` for automatic configuration!
+# It discovers Plex settings and library paths automatically.
+
+# =============================================================================
+# Media Library Paths
+# =============================================================================
+# These paths should point to your Plex/Jellyfin/Emby library folders.
+# Use ~ for home directory (e.g., ~/media expands to /home/user/media)
+
+[paths]
+tv_dir = "~/media/TV Shows"
+movies_dir = "~/media/Movies"
+trash_dir = "~/.jackmediaman/trash"
+torrent_dir = "~/torrents/completed"
+
+# =============================================================================
+# Deluge Daemon Connection
+# =============================================================================
+# Used for seeding protection - prevents deletion of files still being seeded.
+# For localhost: username/password are optional (uses ~/.config/deluge/auth)
+# For remote daemon: username and password are required
+
+[deluge]
+host = "127.0.0.1"
+port = 58846
+username = ""
+password = ""
+
+# =============================================================================
+# TMDb API (The Movie Database)
+# =============================================================================
+# Used for accurate movie/TV identification and metadata.
+# Get a FREE API key at: https://www.themoviedb.org/settings/api
+# (Create account -> Settings -> API -> Create -> Developer)
+
+[tmdb]
+api_key = ""
+
+# =============================================================================
+# OpenSubtitles API
+# =============================================================================
+# Used for automatic subtitle downloads.
+# Get a FREE API key at: https://www.opensubtitles.com/en/consumers
+# (Create account -> Consumers -> Create App)
+
+[opensubtitles]
+api_key = ""
+languages = "en"
+
+# =============================================================================
+# Plex Integration
+# =============================================================================
+# Notifies Plex when media is added/changed for instant library updates.
+# Token can be auto-discovered from Plex - run: jmm setup plex
+# Or get manually: https://support.plex.tv/articles/204059436/
+
+[plex]
+url = "http://localhost:32400"
+token = ""
+notify_enabled = true
+
+# =============================================================================
+# Processing Options
+# =============================================================================
+# Controls how files are handled when processing torrents
+# default_action: move, copy, hardlink, symlink, keeplink
+# - symlink: Creates symlink in library, original stays for seeding (recommended)
+# - keeplink: Moves to library, leaves symlink at original location
+
+[processing]
+default_action = "symlink"
+cleanup_archives = false
+
+# =============================================================================
+# Cache & Performance
+# =============================================================================
+
+[cache]
+dir = "~/.jackmediaman/cache"
+ttl = 86400
+ffprobe_enabled = true
+ffprobe_workers = 4
+ffprobe_timeout = 30
+
+# =============================================================================
+# Web UI
+# =============================================================================
+# Optional web interface - start with: jmm --web
+
+[web]
+port = 8080
