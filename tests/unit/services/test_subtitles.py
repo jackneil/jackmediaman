@@ -479,6 +479,200 @@ class TestSubtitleService:
         assert len(results) == 2
 
 
+AD_SRT = (
+    "1\n00:00:00,001 --> 04:00:00,003\n"
+    "Become OpenSubtitles.org VIP Member\n"
+    "to get subtitles -> osdb.link/vip\n"
+)
+REAL_SRT = "1\n00:00:01,000 --> 00:00:03,000\nHello\n"
+COM_RESULT = [{"attributes": {"language": "en", "files": [{"file_id": 12345}]}}]
+ORG_RESULT = [{"SubLanguageID": "eng", "IDSubtitleFile": "999"}]
+
+
+class TestPlaceholderHandling:
+    """OpenSubtitles.org VIP ads must never be saved (issue #1)."""
+
+    def _service(self, *clients):
+        service = SubtitleService(client=clients[0][1])
+        service.clients = list(clients)
+        return service
+
+    def test_ad_not_written_and_provider_disabled(self, tmp_path):
+        """An ad is not saved and its provider is skipped for later files."""
+        org = MagicMock(spec=OpenSubtitlesOrgClient)
+        org.search.return_value = ORG_RESULT
+        org.download.return_value = AD_SRT
+        service = self._service(("org", org))
+
+        video1 = tmp_path / "a.mkv"
+        video1.touch()
+        video2 = tmp_path / "b.mkv"
+        video2.touch()
+
+        result = service.download_for_file(video1, languages=["en"])
+        assert result.success is False
+        assert not (tmp_path / "a.en.srt").exists()
+        assert "org" in service.disabled_providers
+        assert service.stop_reason is not None
+
+        result2 = service.download_for_file(video2, languages=["en"])
+        assert result2.success is False
+        assert org.search.call_count == 1
+
+    def test_ad_from_org_falls_through_to_com(self, tmp_path):
+        """If .org serves an ad, the next provider is still tried."""
+        org = MagicMock(spec=OpenSubtitlesOrgClient)
+        org.search.return_value = ORG_RESULT
+        org.download.return_value = AD_SRT
+        com = MagicMock(spec=OpenSubtitlesComClient)
+        com.search.return_value = COM_RESULT
+        com.download.return_value = REAL_SRT
+        com.quota_exhausted = False
+        service = self._service(("org", org), ("com", com))
+
+        video = tmp_path / "a.mkv"
+        video.touch()
+        result = service.download_for_file(video, languages=["en"])
+
+        assert result.success is True
+        assert result.provider == "com"
+        assert (tmp_path / "a.en.srt").read_text() == REAL_SRT
+        assert service.disabled_providers == {"org"}
+        assert service.stop_reason is None
+
+    def test_existing_ad_treated_as_missing(self, tmp_path):
+        """An ad .srt already on disk is replaced by a real subtitle."""
+        com = MagicMock(spec=OpenSubtitlesComClient)
+        com.search.return_value = COM_RESULT
+        com.download.return_value = REAL_SRT
+        com.quota_exhausted = False
+        service = self._service(("com", com))
+
+        video = tmp_path / "a.mkv"
+        video.touch()
+        (tmp_path / "a.en.srt").write_text(AD_SRT)
+
+        result = service.download_for_file(video, languages=["en"])
+
+        assert result.skipped is False
+        assert result.success is True
+        assert (tmp_path / "a.en.srt").read_text() == REAL_SRT
+
+    def test_quota_error_stops_directory_run(self, tmp_path):
+        """A quota error stops the run instead of hammering the API."""
+        from jackmediaman.core.exceptions import OpenSubtitlesQuotaError
+
+        com = MagicMock(spec=OpenSubtitlesComClient)
+        com.search.return_value = COM_RESULT
+        com.download.side_effect = OpenSubtitlesQuotaError("quota used up")
+        service = self._service(("com", com))
+
+        for name in ("a.mkv", "b.mkv", "c.mkv"):
+            (tmp_path / name).touch()
+
+        results = service.download_for_directory(tmp_path, languages=["en"])
+
+        assert len(results) == 1
+        assert service.stop_reason == "quota used up"
+        assert com.download.call_count == 1
+
+    def test_zero_remaining_saves_then_stops(self, tmp_path):
+        """remaining == 0 keeps the current download, then stops the run."""
+        com = MagicMock(spec=OpenSubtitlesComClient)
+        com.search.return_value = COM_RESULT
+        com.download.return_value = REAL_SRT
+        com.quota_exhausted = True
+        service = self._service(("com", com))
+
+        for name in ("a.mkv", "b.mkv"):
+            (tmp_path / name).touch()
+
+        results = service.download_for_directory(tmp_path, languages=["en"])
+
+        assert len(results) == 1
+        assert results[0].success is True
+        assert service.stop_reason is not None
+
+
+class TestComClientQuota:
+    """OpenSubtitles.com quota responses."""
+
+    def _client(self):
+        client = OpenSubtitlesComClient(api_key="k", username="u", password="p")
+        client.jwt_token = "jwt"
+        client.RATE_LIMIT_DELAY = 0
+        return client
+
+    def test_406_raises_quota_error(self):
+        from jackmediaman.core.exceptions import OpenSubtitlesQuotaError
+
+        client = self._client()
+        response = MagicMock()
+        response.status_code = 406
+        response.json.return_value = {
+            "message": "You have downloaded your allowed 20 subtitles for 24h",
+            "reset_time_utc": "2026-09-30T00:00:00.000Z",
+        }
+        with patch("httpx.post", return_value=response):
+            with pytest.raises(OpenSubtitlesQuotaError, match="resets 2026-09-30"):
+                client.download(12345)
+        assert client.quota_exhausted is True
+
+    def test_remaining_zero_sets_flag(self):
+        client = self._client()
+        link = MagicMock()
+        link.status_code = 200
+        link.json.return_value = {"link": "https://example.com/s.srt", "remaining": 0}
+        content = MagicMock()
+        content.text = REAL_SRT
+        with patch("httpx.post", return_value=link), patch("httpx.get", return_value=content):
+            assert client.download(12345) == REAL_SRT
+        assert client.quota_exhausted is True
+
+
+class TestPurgeAdsCommand:
+    """jmm subtitles purge-ads."""
+
+    def _settings(self, tmp_path):
+        tv = tmp_path / "tv"
+        movies = tmp_path / "movies"
+        (tv / "Show").mkdir(parents=True)
+        (movies / "Film (2020)").mkdir(parents=True)
+        (tv / "Show" / "ep.en.srt").write_text(AD_SRT)
+        (movies / "Film (2020)" / "Film.en.srt").write_text(AD_SRT)
+        (movies / "Film (2020)" / "Film.es.srt").write_text(REAL_SRT)
+        settings = MagicMock()
+        settings.tv_dir = tv
+        settings.movies_dir = movies
+        return settings
+
+    def test_dry_run_keeps_files(self, tmp_path):
+        from typer.testing import CliRunner
+        from jackmediaman.cli.commands.subtitles import app
+
+        settings = self._settings(tmp_path)
+        with patch("jackmediaman.cli.commands.subtitles.get_settings", return_value=settings):
+            result = CliRunner().invoke(app, ["purge-ads", "--dry-run"])
+
+        assert result.exit_code == 0
+        assert "would delete 2" in result.output
+        assert (settings.tv_dir / "Show" / "ep.en.srt").exists()
+
+    def test_deletes_only_ads_for_type(self, tmp_path):
+        from typer.testing import CliRunner
+        from jackmediaman.cli.commands.subtitles import app
+
+        settings = self._settings(tmp_path)
+        with patch("jackmediaman.cli.commands.subtitles.get_settings", return_value=settings):
+            result = CliRunner().invoke(app, ["purge-ads", "--type", "movies"])
+
+        assert result.exit_code == 0
+        assert "Deleted 1" in result.output
+        assert not (settings.movies_dir / "Film (2020)" / "Film.en.srt").exists()
+        assert (settings.movies_dir / "Film (2020)" / "Film.es.srt").exists()
+        assert (settings.tv_dir / "Show" / "ep.en.srt").exists()
+
+
 class TestVideoExtensions:
     """Tests for VIDEO_EXTENSIONS constant."""
 

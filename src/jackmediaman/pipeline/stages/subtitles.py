@@ -95,6 +95,10 @@ class SubtitleStage:
                     recoverable=True,
                 )
 
+            if self._service.stop_reason:
+                logger.warning(f"Stopping subtitle downloads: {self._service.stop_reason}")
+                break
+
         if downloaded == 0 and failed == 0:
             return StageOutput(
                 result=StageResult.SKIPPED,

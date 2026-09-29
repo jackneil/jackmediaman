@@ -53,3 +53,9 @@ class OpenSubtitlesError(JackMediaManError):
     """OpenSubtitles API-related errors."""
 
     pass
+
+
+class OpenSubtitlesQuotaError(OpenSubtitlesError):
+    """OpenSubtitles download quota used up; further requests are pointless."""
+
+    pass
